@@ -1,5 +1,7 @@
 .gmail-profile/
 output/
+data/
+models/
 __pycache__/
 *.pyc
 .venv/

@@ -24,6 +24,8 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
+from email_classifier import get_model, predict, set_model_path
+
 ROOT = Path(__file__).resolve().parent
 DEFAULT_PROFILE = ROOT / ".gmail-profile"
 DEFAULT_OUTPUT = ROOT / "output"
@@ -652,12 +654,28 @@ def scrape_messages(
             if pause_s and not page.is_closed():
                 page.wait_for_timeout(int(pause_s * 1000))
         records.append(build_record(stub, opened, error))
-        if not passes_mail_check(records[-1]):
-            print("    skipped, message does not say thank and application or applying")
+        if not accept_record(records[-1]):
             records.pop()
             continue
         if on_progress and index % 10 == 0:
             on_progress(records)
+
+
+def accept_record(record: dict) -> bool:
+    """Keep an email. A trained model replaces the regex filter and status rules."""
+    model = get_model()
+    if model is None:
+        if not passes_mail_check(record):
+            print("    skipped, message does not say thank and application or applying")
+            return False
+        return True
+    prediction = predict(model, record)
+    if prediction["label"] != "application":
+        print("    skipped, trained model says this is not an application")
+        return False
+    if prediction.get("status"):
+        record["status"] = prediction["status"]
+    return True
 
 
 def write_outputs(records: list[dict], output_dir: Path) -> tuple[Path, Path]:
@@ -667,7 +685,9 @@ def write_outputs(records: list[dict], output_dir: Path) -> tuple[Path, Path]:
     deduped: list[dict] = []
     seen: set[str] = set()
     for record in records:
-        if not keep_handshake_message(record) or not passes_mail_check(record):
+        if not keep_handshake_message(record):
+            continue
+        if get_model() is None and not passes_mail_check(record):
             continue
         key = record.get("thread_id") or "|".join(
             [record.get("date") or "", record.get("company") or "", record.get("role") or "", record.get("subject") or ""]
@@ -740,6 +760,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--list-only", action="store_true", help="Save inbox rows without opening each email.")
     parser.add_argument("--profile", type=Path, default=DEFAULT_PROFILE, help="Directory for the signed-in browser profile.")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT, help="Directory for JSON and CSV results.")
+    parser.add_argument(
+        "--model",
+        type=Path,
+        default=ROOT / "models" / "email_classifier.joblib",
+        help="Trained classifier. If this file is missing, regex rules are used.",
+    )
     args = parser.parse_args()
     if args.max is not None and args.max < 1:
         parser.error("--max must be at least 1")
@@ -759,6 +785,12 @@ def main() -> None:
             "  pip install -r requirements.txt\n"
             "  python -m playwright install chromium"
         )
+
+    set_model_path(args.model)
+    if get_model() is None:
+        print("No trained model found. Using the built-in keyword rules.")
+    else:
+        print(f"Using trained model: {args.model}")
 
     records: list[dict] = []
     with sync_playwright() as playwright:
